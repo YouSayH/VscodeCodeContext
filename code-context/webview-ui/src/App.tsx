@@ -1,35 +1,50 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import { useEffect, useState } from 'react';
+import './App.css';
+import { vscode } from './utilities/vscode';
+import { GraphCanvas } from './components/GraphCanvas';
 
-function App() {
-  const [count, setCount] = useState(0)
-
-  return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+interface GraphData {
+    nodes: any[];
+    edges: any[];
 }
 
-export default App
+function App() {
+    const [graphData, setGraphData] = useState<GraphData | null>(null);
+
+    useEffect(() => {
+        const handleMessage = (event: MessageEvent) => {
+            const message = event.data;
+            switch (message.command) {
+                case 'UPDATE_GRAPH':
+                    console.log('📡 Received Graph Data:', message.data);
+                    setGraphData(message.data);
+                    break;
+            }
+        };
+
+        window.addEventListener('message', handleMessage);
+        vscode.postMessage({ command: 'REQUEST_INIT' });
+
+        return () => window.removeEventListener('message', handleMessage);
+    }, []);
+
+    return (
+        <div className="app-container">
+            {graphData ? (
+                // データがある場合はグラフを描画
+                <div className="graph-wrapper" style={{ width: '100vw', height: '100vh' }}>
+                     <GraphCanvas elements={graphData} />
+                     <div className="status-overlay">
+                        Loaded: {graphData.nodes.length} nodes
+                     </div>
+                </div>
+            ) : (
+                <div className="loading">
+                    <p>Waiting for code analysis...</p>
+                </div>
+            )}
+        </div>
+    );
+}
+
+export default App;

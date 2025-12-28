@@ -2,10 +2,10 @@
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
+  color-scheme: dark; /* VS Codeに合わせてダークモード基本 */
+  background-color: transparent; /* 背景色はVS Codeに任せる */
 
-  color-scheme: light dark;
   color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -22,12 +22,13 @@ a:hover {
   color: #535bf2;
 }
 
-body {
+
+html, body {
   margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden; /* スクロールバーを出さない */
 }
 
 h1 {
@@ -52,6 +53,15 @@ button:hover {
 button:focus,
 button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 @media (prefers-color-scheme: light) {

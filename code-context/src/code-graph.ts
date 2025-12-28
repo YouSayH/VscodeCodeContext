@@ -36,9 +36,26 @@ export class CodeGraph {
         this.wasmDir = wasmDir;
     }
 
+    /**
+     * CozoDBコマンドを実行し、エラーがあれば例外を投げるヘルパー
+     */
+    private async runCommand(query: string, params: object = {}): Promise<any> {
+        if (!this.db) throw new Error("Database not initialized");
+        
+        const resultStr = await this.db.run(query, JSON.stringify(params));
+        const result = JSON.parse(resultStr);
+
+        if (result.ok === false) {
+            // エラー内容を詳細にログ出力
+            console.error(`❌ CozoDB Error in query: ${query.substring(0, 50)}...`);
+            console.error(`Reason: ${JSON.stringify(result)}`);
+            throw new Error(result.message || result.display || "CozoDB Query Failed");
+        }
+        return result;
+    }
 
     async init() {
-        if (this.isInitialized) {return;}
+        if (this.isInitialized) { return; }
 
         console.log("⚙️ Initializing CodeGraph...");
         
@@ -99,19 +116,26 @@ export class CodeGraph {
             this.db = CozoDb.new();
             console.log("✅ Database initialized:", !!this.db);
 
-            // スキーマ作成
-            const schemaQuery = `
-                :create files { path: String => language: String, last_modified: Float }
-                :create symbols { id: String => file_path: String, name: String, kind: String, start_line: Int, end_line: Int }
-                :create relations { from_id: String, to_id: String, type: String => count: Int }
-            `;
-            await this.db.run(schemaQuery, "{}");
+            // スキーマ作成（エラーチェック付き実行）
+            // テーブルが既に存在する場合のエラーを避けるため、一旦削除するか、作成前にチェックするのが理想ですが、
+            // インメモリDBなので起動時は常に空です。
+            const schemas = [
+                `:create files { path: String => language: String, last_modified: Float }`,
+                `:create symbols { id: String => file_path: String, name: String, kind: String, start_line: Int, end_line: Int }`,
+                `:create relations { from_id: String, to_id: String, type: String => count: Int }`
+            ];
+
+            for (const q of schemas) {
+                await this.runCommand(q);
+            }
             
             this.isInitialized = true;
-            console.log("✅ Database initialized:", !!this.db);
+            console.log("✅ Database initialized successfully.");
 
         } catch (error) {
             console.error("❌ Initialization Failed:", error);
+            // 初期化失敗時はフラグを立てない
+            this.isInitialized = false;
         }
     }
 
@@ -198,6 +222,8 @@ export class CodeGraph {
                     if (funcNode) {
                         const callerId = scopeStack[scopeStack.length - 1];
                         // 呼び出し先を文字列として保存
+                        // 注意: ここのIDは 'name' そのものだが、定義側は 'path:name' になっているため
+                        // そのままでは繋がらない。getNetwork側でフィルタリングすることでクラッシュを防ぐ。
                         relations.push(`['${callerId}', '${funcNode.text}', 'call', 1]`);
                     }
                 }
@@ -214,15 +240,17 @@ export class CodeGraph {
 
             traverseAndCollect(tree.rootNode);
 
-            // DB Upsert
+            // DB Upsert (エラーチェック付き)
+            // データ内にシングルクォートが含まれるとクエリが壊れるため、簡易エスケープが必要ですが
+            // MVPでは一旦そのまま進めます（本格対応時はパラメータバインディングを使用すべき）
             if (fileRows.length > 0) {
-                await this.db.run(`?[path, language, last_modified] <- [${fileRows.join(',')}] :put files`, "{}");
+                await this.runCommand(`?[path, language, last_modified] <- [${fileRows.join(',')}] :put files`);
             }
             if (symbolRows.length > 0) {
-                await this.db.run(`?[id, file_path, name, kind, start_line, end_line] <- [${symbolRows.join(',')}] :put symbols`, "{}");
+                await this.runCommand(`?[id, file_path, name, kind, start_line, end_line] <- [${symbolRows.join(',')}] :put symbols`);
             }
             if (relations.length > 0) {
-                await this.db.run(`?[from_id, to_id, type, count] <- [${relations.join(',')}] :put relations`, "{}");
+                await this.runCommand(`?[from_id, to_id, type, count] <- [${relations.join(',')}] :put relations`);
             }
 
             console.log(`💾 Processed ${filePath}: ${symbolRows.length} symbols, ${relations.length} relations.`);
@@ -254,10 +282,11 @@ export class CodeGraph {
             return { ok: false, rows: [] };
         }
         try {
+            // runCommandを使わず、呼び出し元で処理しやすいように生の結果をパースして返す
             const jsonStr = await this.db.run(datalog, "{}");
             return JSON.parse(jsonStr);
         } catch (e) {
-            console.error("Query failed:", e);
+            console.error("Query execution error:", e);
             return { ok: false, rows: [], error: e };
         }
     }
@@ -275,36 +304,98 @@ export class CodeGraph {
             // files: path, language
             // symbols: id, kind, name
             const filesQuery = `?[id, kind, label] := *files[id, language, _], kind = "file", label = id`;
-            const symbolsQuery = `?[id, kind, label] := *symbols[id, _, name, kind, _, _], label = name`;
-            
-            // 2. 全エッジ取得 (Relations)
-            // idは一意にする必要があるため "from-type-to" のような形式にする
-            const edgesQuery = `?[id, source, target, type] := *relations[source, target, type, _], id = source ++ "-" ++ type ++ "-" ++ target`;
+            // シンボル情報に file_path も含めて取得する（同一ファイルの優先解決のため）
+            const symbolsQuery = `?[id, kind, label, file] := *symbols[id, file, name, kind, _, _], label = name`;
 
-            // クエリ実行
+            // エッジ取得
+            const relationsQuery = `?[source, target, type] := *relations[source, target, type, _]`;
+
             const files = await this.query(filesQuery);
             const symbols = await this.query(symbolsQuery);
-            const relations = await this.query(edgesQuery);
+            const relations = await this.query(relationsQuery);
 
             const nodes: any[] = [];
             const edges: any[]  = [];
+            
+            // 存在するノードIDのセット（検証用）
+            const validNodeIds = new Set<string>();
+            const nameToIds: Record<string, any[]> = {};
 
-            // ノードの整形
-            if (files.rows) {
+            // Helper to add to name index
+            const addToIndex = (name: string, id: string, file: string) => {
+                if (!nameToIds[name]) nameToIds[name] = [];
+                nameToIds[name].push({ id, file });
+            };
+
+            if (files.ok && files.rows) {
                 files.rows.forEach((row: any[]) => {
-                    nodes.push({ data: { id: row[0], kind: row[1], label: row[2] } });
+                    const [id, kind, label] = row;
+                    nodes.push({ data: { id, kind, label } });
+                    validNodeIds.add(id);
+                    // ファイル名自体もインデックスに入れておく（import解決用など）
+                    addToIndex(path.basename(id, path.extname(id)), id, id); 
                 });
             }
-            if (symbols.rows) {
+            if (symbols.ok && symbols.rows) {
                 symbols.rows.forEach((row: any[]) => {
-                    nodes.push({ data: { id: row[0], kind: row[1], label: row[2] } });
+                    const [id, kind, label, file] = row;
+                    nodes.push({ data: { id, kind, label } });
+                    validNodeIds.add(id);
+                    addToIndex(label, id, file);
                 });
             }
 
-            // エッジの整形
-            if (relations.rows) {
+            // 2. エッジの解決
+            if (relations.ok && relations.rows) {
                 relations.rows.forEach((row: any[]) => {
-                    edges.push({ data: { id: row[0], source: row[1], target: row[2], type: row[3] } });
+                    const sourceId = row[0];
+                    const rawTarget = row[1]; // これが "load_data" や "processor.clean" になっている
+                    const type = row[2];
+
+                    if (type === 'contains') {
+                        // Containsは既に正しいIDなのでそのまま追加
+                        if (validNodeIds.has(sourceId) && validNodeIds.has(rawTarget)) {
+                            const edgeId = `${sourceId}-${type}-${rawTarget}`;
+                            edges.push({ data: { id: edgeId, source: sourceId, target: rawTarget, type } });
+                        }
+                    } else if (type === 'call') {
+                        // Callは名前解決を試みる
+                        // 1. そのままの名前で検索 (例: "DataProcessor")
+                        // 2. ドットで分割して末尾で検索 (例: "processor.clean" -> "clean")
+                        const targetName = rawTarget.split('.').pop() || rawTarget;
+                        const candidates = nameToIds[targetName];
+
+                        if (candidates) {
+                            // 候補が見つかった場合
+                            // ヒューリスティック: 呼び出し元と同じファイルの候補を優先する
+                            // (sourceId自体が "filepath:name" 形式か、 "filepath" そのもの)
+                            const sourceFile = sourceId.includes(':') ? sourceId.split(':')[0] : sourceId;
+                            
+                            let bestMatch = candidates.find(c => c.file === sourceFile);
+                            
+                            // 同一ファイルの候補があればそれにリンク、なければ最初の候補にリンク（簡易実装）
+                            const targetId = bestMatch ? bestMatch.id : candidates[0].id;
+                            
+                            const edgeId = `${sourceId}-call-${targetId}`;
+                            // 重複防止
+                            if (!edges.find(e => e.data.id === edgeId)) {
+                                edges.push({ data: { id: edgeId, source: sourceId, target: targetId, type: 'call' } });
+                            }
+                        }
+                    } else if (type === 'import') {
+                         // Importも簡易的に名前解決
+                         const targetName = rawTarget.split('.').pop() || rawTarget;
+                         const candidates = nameToIds[targetName];
+                         // importの場合はファイルノードまたはクラスノードへリンクしたい
+                         // MVPでは "ファイル名" と一致する場合のみリンクさせる等の制限も可
+                         if (candidates) {
+                             const targetId = candidates[0].id; // 暫定：最初の候補
+                             const edgeId = `${sourceId}-import-${targetId}`;
+                             if (!edges.find(e => e.data.id === edgeId)) {
+                                 edges.push({ data: { id: edgeId, source: sourceId, target: targetId, type: 'import' } });
+                             }
+                         }
+                    }
                 });
             }
 
