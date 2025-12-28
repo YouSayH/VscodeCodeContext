@@ -1,6 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { CodeGraph } from './code-graph';
 import { CodeContextProvider } from './tree-provider';
+import { CodeGraphPanel } from './panels/CodeGraphPanel';
+
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('🚀 Code Context Extension is now active!');
@@ -19,22 +22,34 @@ export function activate(context: vscode.ExtensionContext) {
     const wasmDir = path.join(context.extensionPath, 'wasm');
 
     // 3. TreeProvider の初期化
-    const codeContextProvider = new CodeContextProvider(workspaceRoot, wasmDir);
+    // CodeGraph をここで生成・管理する
+    const codeGraph = new CodeGraph(wasmDir);
+
+    // Provider にインスタンスを渡す (第2引数が wasmDir から codeGraph に変わります)
+    const codeContextProvider = new CodeContextProvider(workspaceRoot, codeGraph);
 
     // 4. VS Code にツリービューを登録 (package.json の viewId と一致させる)
     vscode.window.registerTreeDataProvider('code-context-view', codeContextProvider);
 
-    // 5. 更新コマンドの登録
-    let disposable = vscode.commands.registerCommand('code-context.refresh', () => {
+    // 5. コマンド登録: グラフ画面を開く
+    context.subscriptions.push(
+        vscode.commands.registerCommand('code-context.openGraph', () => {
+            CodeGraphPanel.createOrShow(context.extensionUri, codeGraph);
+        })
+    );
+
+    // 6. コマンド登録: データ更新
+    context.subscriptions.push(
+        vscode.commands.registerCommand('code-context.refresh', () => {
         codeContextProvider.refresh();
         vscode.window.showInformationMessage('Code Context refreshed!');
-    });
+        })
+    );
 
-    context.subscriptions.push(disposable);
-
-    // 6. 初回インデックス作成を実行
-    // (拡張機能起動時に自動で解析を始めます)
-    codeContextProvider.initialize().then(() => {
+    // 7. 初期化フロー: DB初期化 -> 初回スキャン
+    codeGraph.init().then(async () => {
+        // DB準備完了後にツリービュー用のスキャンを実行
+        await codeContextProvider.initialize();
         console.log("✅ Initial indexing complete.");
     });
 }

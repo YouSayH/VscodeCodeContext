@@ -37,12 +37,12 @@ export class CodeContextProvider implements vscode.TreeDataProvider<CodeItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<CodeItem | undefined | null | void> = new vscode.EventEmitter<CodeItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<CodeItem | undefined | null | void> = this._onDidChangeTreeData.event;
 
-    private graph: CodeGraph;
+    public readonly graph: CodeGraph;
     private workspaceRoot: string;
 
-    constructor(rootPath: string, wasmDir: string) {
+    constructor(rootPath: string, codeGraph: CodeGraph) {
         this.workspaceRoot = rootPath;
-        this.graph = new CodeGraph(wasmDir);
+        this.graph = codeGraph;
     }
 
     refresh(): void {

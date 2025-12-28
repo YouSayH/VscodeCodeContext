@@ -37,6 +37,11 @@
         "command": "code-context.refresh",
         "title": "Refresh Context",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "code-context.openGraph",
+        "title": "Open Graph",
+        "icon": "$(graph)"
       }
     ],
     "menus": {
