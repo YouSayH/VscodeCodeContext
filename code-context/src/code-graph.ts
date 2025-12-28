@@ -183,9 +183,19 @@ export class CodeGraph {
             const tree = this.parser.parse(content);
 
             // データ収集用配列
-            const fileRows: string[] = [`['${filePath}', '${langKey}', ${lastModified}]`];
-            const symbolRows: string[] = [];
-            const relations: string[] = [];
+            // const fileRows: string[] = [`['${filePath}', '${langKey}', ${lastModified}]`];
+            // const symbolRows: string[] = [];
+            // const relations: string[] = [];
+
+            // filesテーブル用: [path, language, last_modified]
+            const fileRows: any[][] = [[filePath, langKey, lastModified]];
+            
+            // symbolsテーブル用: [id, file_path, name, kind, start_line, end_line]
+            const symbolRows: any[][] = [];
+            
+            // relationsテーブル用: [from_id, to_id, type, count]
+            const relations: any[][] = [];
+
             
             // Scope Stack: 現在の親ノードID (最初はファイルパス)
             const scopeStack: string[] = [filePath]; 
@@ -202,10 +212,11 @@ export class CodeGraph {
                         const kind = node.type.includes('class') ? 'class' : 'function';
                         currentId = this.generateId(filePath, name);
                         
-                        symbolRows.push(`['${currentId}', '${filePath}', '${name}', '${kind}', ${node.startPosition.row}, ${node.endPosition.row}]`);
+                        // 配列としてpush
+                        symbolRows.push([currentId, filePath, name, kind, node.startPosition.row, node.endPosition.row]);
                         
                         const parentId = scopeStack[scopeStack.length - 1];
-                        relations.push(`['${parentId}', '${currentId}', 'contains', 1]`);
+                        relations.push([parentId, currentId, 'contains', 1]);
                         
                         scopeStack.push(currentId);
                         pushedScope = true;
@@ -216,7 +227,7 @@ export class CodeGraph {
                 if (node.type === 'import_statement') {
                      node.children.forEach((c: any) => {
                          if (c.type === 'dotted_name') {
-                             relations.push(`['${filePath}', '${c.text}', 'import', 1]`);
+                             relations.push([filePath, c.text, 'import', 1]);
                          }
                      });
                 }
@@ -224,7 +235,7 @@ export class CodeGraph {
                     // from X import Y -> Xを依存先とする
                     const modNode = node.children.find((c: any) => c.type === 'dotted_name' || c.type === 'identifier'); 
                     if (modNode) {
-                        relations.push(`['${filePath}', '${modNode.text}', 'import', 1]`);
+                        relations.push([filePath, modNode.text, 'import', 1]);
                     }
                 }
 
@@ -247,11 +258,10 @@ export class CodeGraph {
                         // 呼び出し先を文字列として保存
                         // 注意: ここのIDは 'name' そのものだが、定義側は 'path:name' になっているため
                         // そのままでは繋がらない。getNetwork側でフィルタリングすることでクラッシュを防ぐ。
-                        relations.push(`['${callerId}', '${funcNode.text}', 'call', 1]`);
+                        relations.push([callerId, funcNode.text, 'call', 1]);
                     }
                 }
 
-                // Recurse
                 for (let i = 0; i < node.childCount; i++) {
                     traverseAndCollect(node.child(i));
                 }
@@ -264,16 +274,15 @@ export class CodeGraph {
             traverseAndCollect(tree.rootNode);
 
             // DB Upsert (エラーチェック付き)
-            // データ内にシングルクォートが含まれるとクエリが壊れるため、簡易エスケープが必要ですが
-            // MVPでは一旦そのまま進めます（本格対応時はパラメータバインディングを使用すべき）
+            // $data という変数名でデータを渡し、クエリ側で受け取ります
             if (fileRows.length > 0) {
-                await this.runCommand(`?[path, language, last_modified] <- [${fileRows.join(',')}] :put files`);
+                await this.runCommand(`?[path, language, last_modified] <- $data :put files`, { data: fileRows });
             }
             if (symbolRows.length > 0) {
-                await this.runCommand(`?[id, file_path, name, kind, start_line, end_line] <- [${symbolRows.join(',')}] :put symbols`);
+                await this.runCommand(`?[id, file_path, name, kind, start_line, end_line] <- $data :put symbols`, { data: symbolRows });
             }
             if (relations.length > 0) {
-                await this.runCommand(`?[from_id, to_id, type, count] <- [${relations.join(',')}] :put relations`);
+                await this.runCommand(`?[from_id, to_id, type, count] <- $data :put relations`, { data: relations });
             }
 
             console.log(`💾 Processed ${filePath}: ${symbolRows.length} symbols, ${relations.length} relations.`);
@@ -282,7 +291,6 @@ export class CodeGraph {
             console.error(`Error processing ${filePath}:`, e);
         }
     }
-
 
 
     /**
@@ -335,10 +343,8 @@ export class CodeGraph {
             // files: path, language
             // symbols: id, kind, name
             const filesQuery = `?[id, kind, label] := *files[id, language, _], kind = "file", label = id`;
-            // シンボル情報に file_path も含めて取得する（同一ファイルの優先解決のため）
+            // line (start_line) も取得
             const symbolsQuery = `?[id, kind, label, file, line] := *symbols[id, file, name, kind, line, _], label = name`;
-
-            // エッジ取得
             const relationsQuery = `?[source, target, type] := *relations[source, target, type, _]`;
 
             const files = await this.query(filesQuery);
@@ -348,9 +354,9 @@ export class CodeGraph {
             const nodes: any[] = [];
             const edges: any[]  = [];
             
-            // 存在するノードIDのセット（検証用）
             const validNodeIds = new Set<string>();
             const nameToIds: Record<string, any[]> = {};
+
             const addToIndex = (name: string, id: string, file: string) => {
                 if (!nameToIds[name]) {nameToIds[name] = [];}
                 nameToIds[name].push({ id, file });
@@ -359,6 +365,7 @@ export class CodeGraph {
             if (files.ok && files.rows) {
                 files.rows.forEach((row: any[]) => {
                     const [id, kind, label] = row;
+                    // pathを追加
                     nodes.push({ data: { id, kind, label, path: id } });
                     validNodeIds.add(id);
                     // ファイル名自体もインデックスに入れておく（import解決用など）
@@ -367,6 +374,7 @@ export class CodeGraph {
             }
             if (symbols.ok && symbols.rows) {
                 symbols.rows.forEach((row: any[]) => {
+                    // lineを受け取り、データにpathとlineを含める
                     const [id, kind, label, file, line] = row;
                     nodes.push({ data: { id, kind, label, path: file, line: line } });
                     validNodeIds.add(id);
@@ -374,7 +382,6 @@ export class CodeGraph {
                 });
             }
 
-            // 2. エッジの解決
             if (relations.ok && relations.rows) {
                 relations.rows.forEach((row: any[]) => {
                     const sourceId = row[0];
@@ -399,7 +406,6 @@ export class CodeGraph {
                             // ヒューリスティック: 呼び出し元と同じファイルの候補を優先する
                             // (sourceId自体が "filepath:name" 形式か、 "filepath" そのもの)
                             const sourceFile = sourceId.includes(':') ? sourceId.split(':')[0] : sourceId;
-                            
                             let bestMatch = candidates.find(c => c.file === sourceFile);
                             
                             // 同一ファイルの候補があればそれにリンク、なければ最初の候補にリンク（簡易実装）
