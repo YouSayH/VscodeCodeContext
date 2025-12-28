@@ -1,5 +1,21 @@
 import * as vscode from 'vscode';
 import { CodeGraph } from '../code-graph';
+import * as path from 'path';
+
+/**
+ * ======================================================================================
+ * [TROUBLESHOOTING LOG / 開発ログ]
+ * ======================================================================================
+ * * 1. ファイルジャンプ機能の実装 (File Opening)
+ * - 現象: "Failed to open file: test_sample.py" というエラーが出てファイルが開かない。
+ * - 原因: openTextDocument API は絶対パスを要求するが、DBから取得したパスが相対パス（ファイル名のみ）だったため。
+ * - 解決策: path.isAbsolute() で判定し、相対パスの場合はワークスペースのルートURIと結合して絶対パスに変換するロジックを追加。
+ * * 2. Webviewの状態維持 (State Retention)
+ * - 現象: エディタへジャンプした後、グラフに戻ってくると再読み込み（リセット）されてしまう。
+ * - 原因: VS CodeのWebviewはデフォルトで非表示時に破棄され、再表示時に初期化される仕様のため。
+ * - 解決策: createWebviewPanel のオプションに `retainContextWhenHidden: true` を追加し、バックグラウンドでも状態を維持するように設定。
+ * ======================================================================================
+ */
 
 export class CodeGraphPanel {
     public static currentPanel: CodeGraphPanel | undefined;
@@ -25,9 +41,43 @@ export class CodeGraphPanel {
                     case 'REQUEST_INIT':
                         await this._sendGraphData();
                         return;
-                    case 'JUMP_TO_CODE':
-                        // TODO: エディタへジャンプする処理
-                        vscode.window.showInformationMessage(`Jump to: ${message.path}:${message.line}`);
+                    
+                        case 'JUMP_TO_CODE':
+                        try {
+                            let fileUri: vscode.Uri;
+                            const rawPath = message.path;
+
+                            // パスが絶対パスかどうか判定し、URIを作成
+                            if (path.isAbsolute(rawPath)) {
+                                fileUri = vscode.Uri.file(rawPath);
+                            } else {
+                                // 相対パスの場合、ワークスペースのルートと結合して絶対パスにする
+                                if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+                                    fileUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, rawPath);
+                                } else {
+                                    // ワークスペースがない場合はそのまま試みる（うまくいかない可能性が高いが）
+                                    fileUri = vscode.Uri.file(rawPath);
+                                }
+                            }
+
+                            // 行番号 (VS Codeは0始まりなので -1 する)
+                            const line = message.line ? message.line - 1 : 0;
+
+                            // ファイルを開く
+                            const doc = await vscode.workspace.openTextDocument(fileUri);
+                            const editor = await vscode.window.showTextDocument(doc);
+
+                            // 指定行へスクロールとカーソル移動
+                            const position = new vscode.Position(line, 0);
+                            const range = new vscode.Range(position, position);
+                            
+                            editor.selection = new vscode.Selection(position, position);
+                            editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+                            
+                        } catch (error) {
+                            vscode.window.showErrorMessage(`Failed to open file: ${message.path}`);
+                            console.error(error);
+                        }
                         return;
                 }
             },
@@ -54,7 +104,8 @@ export class CodeGraphPanel {
             column || vscode.ViewColumn.One,
             {
                 enableScripts: true, // Reactを実行するために必要
-                localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'dist')]
+                localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'dist')],
+                retainContextWhenHidden: true
             }
         );
 

@@ -2,6 +2,24 @@ import { useEffect, useRef } from 'react';
 import cytoscape from 'cytoscape';
 import fcose from 'cytoscape-fcose';
 
+/**
+ * ======================================================================================
+ * [TROUBLESHOOTING LOG / 開発ログ]
+ * ======================================================================================
+ * * 1. Cytoscapeイベントハンドリング (Event Listener)
+ * - 現象: ダブルクリックしても何も反応しない（エラーも出ない）。
+ * - 原因: Propsとして `onNodeDoubleClick` を受け取っていたが、Cytoscapeインスタンスへのイベント登録 (`cy.on('dblclick', ...)`) を実装し忘れていた。
+ * - 検知: console.logをハンドラ内に仕込んだが発火せず、リスナー登録自体が疑われた。
+ * - 解決策: useEffect内で `cy.on('dblclick', 'node', ...)` を明示的に記述。
+ * * 2. グラフ位置の維持 (Layout Stability)
+ * - 現象: コードを編集して保存するたびに、グラフがランダムに再配置され、見失ってしまう。
+ * - 原因: データ更新時に毎回 `cy.layout({ randomize: true })` が実行されていたため。
+ * - 解決策: 
+ * a) 再描画前に `node.position()` で全ノードの座標を一時保存し、描画後に復元するロジックを追加。
+ * b) 初回以外の描画では `randomize: false` `fit: false` に設定し、ユーザーの視点を維持するように変更。
+ * ======================================================================================
+ */
+
 // レイアウト拡張を登録
 cytoscape.use(fcose);
 
@@ -10,9 +28,10 @@ interface GraphCanvasProps {
         nodes: any[];
         edges: any[];
     };
+    onNodeDoubleClick?: (data: any) => void;
 }
 
-export const GraphCanvas = ({ elements }: GraphCanvasProps) => {
+export const GraphCanvas = ({ elements, onNodeDoubleClick }: GraphCanvasProps) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const cyRef = useRef<cytoscape.Core | null>(null);
 
@@ -131,49 +150,83 @@ export const GraphCanvas = ({ elements }: GraphCanvasProps) => {
             wheelSensitivity: 0.2,
         });
 
+        const cy = cyRef.current;
+        // ノードのダブルクリックイベント
+        cy.on('dblclick', 'node', (evt) => {
+            const node = evt.target;
+            const data = node.data();
+            // 親から渡された関数が存在すれば実行し、ノードのデータを渡す
+            if (onNodeDoubleClick) {
+                onNodeDoubleClick(data);
+            }
+        });
+
+        // UX向上: ホバー時にカーソルをポインターにする
+        cy.on('mouseover', 'node', () => {
+            if (containerRef.current) containerRef.current.style.cursor = 'pointer';
+        });
+        cy.on('mouseout', 'node', () => {
+            if (containerRef.current) containerRef.current.style.cursor = 'default';
+        });
+
+
         // クリーンアップ
         return () => {
             if (cyRef.current) cyRef.current.destroy();
         };
-    }, []);
+    }, []);// 依存配列は空のままでOK（onNodeDoubleClickはRefやイベント内で参照されるため）
 
     // データ更新時の再描画とレイアウト適用
-    useEffect(() => {
+useEffect(() => {
         if (!cyRef.current) return;
 
         const cy = cyRef.current;
 
-        // データ入れ替え
+        // 1. 現在のノード位置を保存 (IDをキーにする)
+        const positions: Record<string, cytoscape.Position> = {};
+        cy.nodes().forEach(node => {
+            positions[node.id()] = { ...node.position() };
+        });
+
+        // 保存された位置があるかチェック（初回描画かどうかの判定に使用）
+        const hasPositions = Object.keys(positions).length > 0;
+
+        // 2. データ入れ替え
         cy.elements().remove();
         cy.add(elements);
         
-        // レイアウト設定 (重なり防止チューニング)
+        // 3. 位置の復元
+        if (hasPositions) {
+            cy.nodes().forEach(node => {
+                const prevPos = positions[node.id()];
+                if (prevPos) {
+                    node.position(prevPos);
+                }
+            });
+        }
+        
+        // 4. レイアウト実行
         cy.layout({ 
             name: 'fcose', 
             // アニメーション設定
             animate: true,
             animationDuration: 800,
-            
             // 初期配置をランダムにすることで「初期の重なり」を防ぐ
-            randomize: true, 
             
+            randomize: !hasPositions, 
+            
+            fit: !hasPositions,
             // クオリティ設定
+
             quality: 'default',
-            
             // ノード間の反発力（大きくすると広がる）
             nodeRepulsion: 6500, 
-            
             // エッジの理想的な長さ（長くすると広がる）
             idealEdgeLength: 150,
-            
             // ノードのサイズを考慮して重ならないようにする
             nodeDimensionsIncludeLabels: true,
-            
             // 異なるコンポーネント（繋がっていないグループ）をどう配置するか
             packComponents: true,
-            
-            // 終了後に全体を画面に収める
-            fit: true,
             padding: 30
         } as any).run();
 

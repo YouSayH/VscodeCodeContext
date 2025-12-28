@@ -18,6 +18,11 @@ import * as util from 'util';
  * - エラー: "Cannot find module 'cozo-lib-wasm'"
  * - 原因: VS Code拡張機能はCommonJSで動作するが、このパッケージはESM形式のみ提供されているため。
  * - 解決策: `new Function('return import(...)')` を使用し、TSコンパイラがrequire()に変換するのを回避して動的インポートを行う。
+
+ * 3. クライアントへのデータ提供 (Data Payload)
+ * - 現象: フロントエンドでファイルを開こうとしても、どのファイル・どの行か分からない。
+ * - 原因: ノードデータに `id` と `label` しか含めておらず、`path` や `line` 情報が欠落していた。
+ * - 解決策: getNetwork() のクエリを修正し、`path` (ファイルパス) と `line` (定義行) を取得して nodes.data に含めるように変更。
  * ======================================================================================
  */
 
@@ -51,7 +56,7 @@ export class CodeGraph {
      * - 検知方法: result.ok を明示的にチェックする。
      */
     private async runCommand(query: string, params: object = {}): Promise<any> {
-        if (!this.db) throw new Error("Database not initialized");
+        if (!this.db) {throw new Error("Database not initialized");}
         
         const resultStr = await this.db.run(query, JSON.stringify(params));
         const result = JSON.parse(resultStr);
@@ -164,14 +169,14 @@ export class CodeGraph {
 
 
     async processFile(filePath: string, content: string, lastModified: number = Date.now()) {
-        if (!this.isInitialized || !this.db) return;
+        if (!this.isInitialized || !this.db) {return;}
 
         const ext = path.extname(filePath);
         let langKey = '';
         if (ext === '.py') { langKey = 'python'; }
         else { return; } // MVPはPython優先
 
-        if (!this.languages[langKey]) return;
+        if (!this.languages[langKey]) {return;}
         this.parser.setLanguage(this.languages[langKey]);
 
         try {
@@ -331,7 +336,7 @@ export class CodeGraph {
             // symbols: id, kind, name
             const filesQuery = `?[id, kind, label] := *files[id, language, _], kind = "file", label = id`;
             // シンボル情報に file_path も含めて取得する（同一ファイルの優先解決のため）
-            const symbolsQuery = `?[id, kind, label, file] := *symbols[id, file, name, kind, _, _], label = name`;
+            const symbolsQuery = `?[id, kind, label, file, line] := *symbols[id, file, name, kind, line, _], label = name`;
 
             // エッジ取得
             const relationsQuery = `?[source, target, type] := *relations[source, target, type, _]`;
@@ -346,17 +351,15 @@ export class CodeGraph {
             // 存在するノードIDのセット（検証用）
             const validNodeIds = new Set<string>();
             const nameToIds: Record<string, any[]> = {};
-
-            // Helper to add to name index
             const addToIndex = (name: string, id: string, file: string) => {
-                if (!nameToIds[name]) nameToIds[name] = [];
+                if (!nameToIds[name]) {nameToIds[name] = [];}
                 nameToIds[name].push({ id, file });
             };
 
             if (files.ok && files.rows) {
                 files.rows.forEach((row: any[]) => {
                     const [id, kind, label] = row;
-                    nodes.push({ data: { id, kind, label } });
+                    nodes.push({ data: { id, kind, label, path: id } });
                     validNodeIds.add(id);
                     // ファイル名自体もインデックスに入れておく（import解決用など）
                     addToIndex(path.basename(id, path.extname(id)), id, id); 
@@ -364,8 +367,8 @@ export class CodeGraph {
             }
             if (symbols.ok && symbols.rows) {
                 symbols.rows.forEach((row: any[]) => {
-                    const [id, kind, label, file] = row;
-                    nodes.push({ data: { id, kind, label } });
+                    const [id, kind, label, file, line] = row;
+                    nodes.push({ data: { id, kind, label, path: file, line: line } });
                     validNodeIds.add(id);
                     addToIndex(label, id, file);
                 });
