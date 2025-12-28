@@ -4,18 +4,25 @@ import * as util from 'util';
 
 /**
  * ======================================================================================
- * [TROUBLESHOOTING LOG 1: Node.js Environment Polyfills]
+ * [TROUBLESHOOTING LOG / 開発ログ]
  * ======================================================================================
- * ■ エラー内容: 
- * "ReferenceError: TextEncoder is not defined" や
- * "TypeError: Cannot read properties of undefined (reading 'length')" (CozoDB内部)
- * * ■ 原因:
- * CozoDB (wasm-bindgen) はブラウザ環境を想定しており、グローバルな `self` や
- * `TextEncoder` が存在することを前提にコードが生成されているため。
- * Node.js にはこれらが標準ではないため、実行時にクラッシュする。
- * * ■ 解法:
- * 以下のコードで環境を「偽装」する。
+ * 過去に発生したエラーと解決策のアーカイブです。保守時の参考にしてください。
+ *
+ * 1. Node.js環境でのPolyfill (Environment Polyfills)
+ * - エラー: "ReferenceError: TextEncoder is not defined"
+ * - エラー: "TypeError: Cannot read properties of undefined (reading 'length')" (CozoDB内部)
+ * - 原因: Wasm版CozoDBはブラウザ環境（グローバルスコープ）を前提としているが、Node.jsには標準で存在しないため。
+ * - 解決策: TextEncoder/Decoder および self/window をグローバルに手動で割り当てる。
+ *
+ * 2. CommonJS環境でのESMパッケージ読み込み (ESM Loading)
+ * - エラー: "Cannot find module 'cozo-lib-wasm'"
+ * - 原因: VS Code拡張機能はCommonJSで動作するが、このパッケージはESM形式のみ提供されているため。
+ * - 解決策: `new Function('return import(...)')` を使用し、TSコンパイラがrequire()に変換するのを回避して動的インポートを行う。
  * ======================================================================================
+ */
+
+/**
+ * Polyfills for Node.js environment
  */
 const polyfills = {
     TextEncoder: util.TextEncoder,
@@ -37,7 +44,11 @@ export class CodeGraph {
     }
 
     /**
-     * CozoDBコマンドを実行し、エラーがあれば例外を投げるヘルパー
+     * [トラブルシューティング・ログ: CozoDBのエラーハンドリング]
+     * - エラー: "沈黙の失敗" (ログ上は初期化成功と出るが、実際にはテーブルが作成されていない)。
+     * - 原因: db.run() は失敗時に例外を投げず、単に { "ok": false } を含むJSON文字列を返す仕様であるため。
+     * - 解決策: 戻り値を必ずパースし、result.ok が false の場合は明示的に Error を投げるラッパーを作成。
+     * - 検知方法: result.ok を明示的にチェックする。
      */
     private async runCommand(query: string, params: object = {}): Promise<any> {
         if (!this.db) throw new Error("Database not initialized");
@@ -60,7 +71,7 @@ export class CodeGraph {
         console.log("⚙️ Initializing CodeGraph...");
         
         try {
-            // 【修正点】 パスではなくパッケージ名で読み込む
+            // パスではなくパッケージ名で読み込む
             // これなら esbuild でバンドルされても解決できます
             // 1. Tree-sitter の読み込み
             const TSModule = require('web-tree-sitter');
@@ -124,6 +135,13 @@ export class CodeGraph {
                 `:create symbols { id: String => file_path: String, name: String, kind: String, start_line: Int, end_line: Int }`,
                 `:create relations { from_id: String, to_id: String, type: String => count: Int }`
             ];
+
+            /**
+             * [トラブルシューティング・ログ: スキーマ作成]
+             * - エラー: "relation_not_found" (最後のテーブルしか作成されない)。
+             * - 原因: 複数の ":create" 文を1つの db.run() 呼び出しで送ると、最後の一文しか実行されない挙動があったため。
+             * - 解決策: create文ごとにループを回し、個別に db.run() を実行するように変更。
+             */
 
             for (const q of schemas) {
                 await this.runCommand(q);
@@ -292,7 +310,15 @@ export class CodeGraph {
     }
 
     /**
-     * Cytoscape.js 用のグラフデータを取得する
+     * [トラブルシューティング・ログ: グラフ可視化ロジック]
+     * 1. 不正なエッジによるクラッシュ
+     * - エラー: "Can not create edge ... with nonexistant target"
+     * - 原因: 外部ライブラリ呼び出し（例: "d.strip"）など、定義ノードが存在しないIDへエッジを張ろうとするとCytoscapeがクラッシュする。
+     * - 解決策: getNetwork() 内で、SourceとTargetの両方が validNodeIds に存在する場合のみエッジを追加するフィルタリングを実装。
+     * * 2. 関数呼び出しエッジの欠落
+     * - 現象: 関数呼び出し（例: main -> load_data）の線が表示されない。
+     * - 原因: 呼び出し元は単純な関数名（例: "load_data"）を使用していたが、定義側のIDは "file:load_data" であり、文字列が一致しなかった。
+     * - 解決策: 名前解決ロジック（nameToIds マップ）を実装し、関数名から適切なノードIDを検索して紐付けるようにした。
      */
     async getNetwork() {
         if (!this.isInitialized || !this.db) {

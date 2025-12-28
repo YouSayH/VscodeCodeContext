@@ -47,6 +47,11 @@ export const GraphCanvas = ({ elements }: GraphCanvasProps) => {
                         'background-color': '#0d47a1', // 青
                         'text-outline-color': '#0d47a1',
                         'width': 'label',
+                        /**
+                         * [トラブルシューティング・ログ: スタイルの型]
+                         * - エラー: "Type 'number' is not assignable to type 'string'".
+                         * - 解決策: Cytoscapeのスタイル値は生の数値ではなく、単位付きの文字列（例: '10px'）である必要がある。
+                         */
                         'padding': '12px'
                     }
                 },
@@ -70,7 +75,7 @@ export const GraphCanvas = ({ elements }: GraphCanvasProps) => {
                         'height': 30
                     }
                 },
-                // --- エッジ（関係線）のスタイル改善 ---
+                // エッジ（関係線）のスタイル改善
                 {
                     selector: 'edge',
                     style: {
@@ -88,6 +93,11 @@ export const GraphCanvas = ({ elements }: GraphCanvasProps) => {
                         'text-background-color': '#1e1e1e', // 背景色で文字を見やすく
                         'text-background-opacity': 1,
                         'text-background-padding': '3px',
+                        /**
+                         * [トラブルシューティング・ログ: 形状の構文]
+                         * - 警告: "round-rectangle" (ハイフンあり) は無効な値。
+                         * - 解決策: 正しい描画のためには "roundrectangle" (ハイフンなし) を使用する。
+                         */
                         'text-background-shape': 'roundrectangle'
                     }
                 },
@@ -137,14 +147,14 @@ export const GraphCanvas = ({ elements }: GraphCanvasProps) => {
         cy.elements().remove();
         cy.add(elements);
         
-        // --- レイアウト設定 (重なり防止チューニング) ---
+        // レイアウト設定 (重なり防止チューニング)
         cy.layout({ 
             name: 'fcose', 
             // アニメーション設定
             animate: true,
             animationDuration: 800,
             
-            // ★重要: 初期配置をランダムにすることで「初期の重なり」を防ぐ
+            // 初期配置をランダムにすることで「初期の重なり」を防ぐ
             randomize: true, 
             
             // クオリティ設定
